@@ -1,11 +1,6 @@
-fastapi==0.115.0
-uvicorn[standard]==0.32.0
-torch==2.10.0+cu128
-torchaudio==2.10.0+cu128
---extra-index-url https://download.pytorch.org/whl/cu128
-omnivoice>=0.1.0
-numpy>=1.26.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+omnivoice>=0.2.1
 soundfile>=0.12.0
-pydantic>=2.0.0
 pydub>=0.25.0
-scipy>=1.12.0
+python-multipart>=0.0.12

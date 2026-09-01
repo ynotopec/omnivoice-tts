@@ -1,149 +1,64 @@
 # OmniVoice TTS
 
-OpenAI-compatible TTS API powered by [OmniVoice](https://huggingface.co/k2-fsa/OmniVoice) — 600+ languages, voice cloning, and voice design.
+Minimal [OpenAI-compatible](https://platform.openai.com/docs/api-reference/audio/createSpeech)
+TTS server for [k2-fsa/OmniVoice](https://huggingface.co/k2-fsa/OmniVoice),
+including multilingual voice cloning.
 
-## Features
-
-- **OpenAI-compatible API** — `/v1/audio/speech` endpoint
-- **Voice cloning** — register a voice from reference audio, or clone on-the-fly
-- **600+ languages** supported
-- **Voice design** — speaker attributes (gender, age, pitch, dialect)
-- **GPU-accelerated** inference (CUDA 12.8+)
-
-## Quick Start
-
-### 1. Install
+## Start
 
 ```bash
-cd ~/work/omnivoice-tts
-bash setup.sh
+./install.sh                         # also upgrades an existing installation
+./run.sh 0.0.0.0 8001               # PORT is chosen automatically if omitted
 ```
 
-### 2. Place reference voices
+`install.sh` uses `uv`, installs Python 3.12 when needed, and creates the virtual
+environment at `~/venv/$(basename "$PWD")`. It is safe to run repeatedly. Models
+use the standard Hugging Face cache; the installer does not duplicate or eagerly
+download them.
 
-Put reference audio files and matching text files in:
-
-```
-~/.omnivoice/voices/
-├── AntonioPacheco.wav
-└── AntonioPacheco.txt   # "Transcription of the reference audio."
-```
-
-### 3. Start the service
+To run at login instead:
 
 ```bash
-bash service.sh start
-# or: systemctl --user enable --now omnivoice-tts.service
+systemctl --user enable --now "$(basename "$PWD").service"
+journalctl --user -fu "$(basename "$PWD").service"
 ```
 
-### 4. Use the API
+The generated user service calls the same `run.sh` and is replaced safely on each
+upgrade. Edit `.env` after installation to set a bearer token or override defaults.
+
+## OpenAI speech API
 
 ```bash
-# List models
-curl http://localhost:8000/v1/models
-
-# Generate speech (using a registered voice)
-curl http://localhost:8000/v1/audio/speech \
-  -H "Content-Type: application/json" \
+TOKEN="$(sed -n 's/^OMNIVOICE_API_TOKEN=//p' .env)"
+curl http://127.0.0.1:8001/v1/audio/speech \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
   -d '{
     "model": "omnivoice",
     "input": "Olá, isto é um teste de síntese de voz.",
-    "voice": "AntonioPacheco",
-    "response_format": "mp3",
-    "speed": 1.0
-  }' \
-  --output speech.mp3
-
-# Register a new voice (base64 audio)
-curl http://localhost:8000/v1/voices/register \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "nova_voz",
-    "reference_audio": "<base64-encoded-audio>",
-    "reference_text": "Transcrição do áudio de referência."
-  }'
-
-# On-the-fly voice cloning
-curl http://localhost:8000/v1/audio/speech \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "omnivoice",
-    "input": "Hello world!",
-    "voice": "clone",
-    "reference_audio": "<base64-encoded-ref-audio>",
-    "reference_text": "Reference transcription.",
-    "response_format": "wav"
-  }'
+    "voice": "default",
+    "language": "Portuguese",
+    "response_format": "mp3"
+  }' --output speech.mp3
 ```
 
-## API Reference
+OpenAPI documentation is available at `/docs`; `/v1/models` and `/v1/voices`
+provide discovery. All `/v1/*` routes require `Authorization: Bearer <token>` when
+`OMNIVOICE_API_TOKEN` is set.
 
-### Endpoints
+For a persistent cloned voice, place a 3–10 second recording and its exact
+transcript in `~/.omnivoice/voices` with matching names, for example
+`portuguese.wav` and `portuguese.txt`, then restart. WAV/FLAC without music, echo,
+or overlapping speech gives the cleanest result. OmniVoice performs its own native
+reference resampling, prompt preprocessing, and denoise conditioning.
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/health` | Health check |
-| GET | `/v1/models` | List models (OpenAI compatible) |
-| GET | `/v1/voices` | List registered voices |
-| POST | `/v1/audio/speech` | Generate speech |
-| POST | `/v1/voices/register` | Register a voice |
-| DELETE | `/v1/voices/{name}` | Delete a voice |
-| POST | `/v1/audio/clone` | Quick TTS with voice upload |
+## Hardware
 
-### Speech Request
+Dependencies are intentionally not tied to an x86-only CUDA wheel index. `uv`
+resolves the PyTorch build exposed for the host platform, allowing the same install
+flow on NVIDIA H100 systems and ARM64 NVIDIA DGX Spark. If a platform image provides
+a vendor PyTorch build, activate the created environment and install that build
+before rerunning `./install.sh`. MP3 input/output additionally requires `ffmpeg` on
+`PATH`; WAV and FLAC do not.
 
-```json
-{
-  "model": "omnivoice",
-  "input": "Text to synthesize",
-  "voice": "AntonioPacheco",  // or "clone" for on-the-fly
-  "response_format": "mp3",   // mp3, wav, flac
-  "speed": 1.0,               // 0.25 - 4.0
-  "reference_audio": "<base64>"  // optional, for voice cloning
-}
-```
-
-### Voice Registration
-
-```json
-{
-  "name": "my_voice",
-  "reference_audio": "<base64-encoded-wav>",
-  "reference_text": "Transcription of the reference audio."
-}
-```
-
-## Service Management
-
-```bash
-bash service.sh start       # Start
-bash service.sh stop        # Stop
-bash service.sh restart     # Restart
-bash service.sh status      # Status
-bash service.sh logs        # Follow logs
-```
-
-Or directly with systemd:
-
-```bash
-systemctl --user daemon-reload
-systemctl --user enable --now omnivoice-tts.service
-systemctl --user status omnivoice-tts.service
-journalctl --user -u omnivoice-tts.service -f
-```
-
-## Configuration
-
-Environment variables (see `.env.example`):
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `OMNIVOICE_HOST` | `0.0.0.0` | Bind address |
-| `OMNIVOICE_PORT` | `8000` | Port |
-| `MODEL_NAME` | `k2-fsa/OmniVoice` | HuggingFace model |
-| `MODEL_CACHE_DIR` | `~/.cache/huggingface` | Model cache location |
-| `VOICES_DIR` | `~/.omnivoice/voices` | Voice reference files |
-
-## License
-
-OmniVoice — check the model card on HuggingFace for licensing details.
+See [`.env.example`](.env.example) for the small set of deployment variables.
