@@ -15,6 +15,10 @@ echo "[1/5] Creating virtual environment..."
 python3 -m venv "$VENV_DIR"
 source "$VENV_DIR/bin/activate"
 
+if [[ ! -f "$PROJECT_DIR/.env" ]]; then
+    cp "$PROJECT_DIR/.env.example" "$PROJECT_DIR/.env"
+fi
+
 # 2. Install dependencies
 echo "[2/5] Installing dependencies (this may take a few minutes)..."
 pip install --upgrade pip
@@ -50,13 +54,13 @@ After=network.target
 Type=simple
 ExecStart=$VENV_DIR/bin/python $PROJECT_DIR/app/server.py
 WorkingDirectory=$PROJECT_DIR
-Environment=PATH=$VENV_DIR/bin:%(ENV_PATH)
+Environment=PATH=$VENV_DIR/bin:/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=$PROJECT_DIR/.env
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
-CUDA_VISIBLE_DEVICES=0
+Environment=CUDA_VISIBLE_DEVICES=0
 
 [Install]
 WantedBy=default.target
@@ -74,7 +78,7 @@ echo ""
 echo "  3. Check status:"
 echo "     systemctl --user status omnivoice-tts.service"
 echo ""
-echo "  4. API available at: http://localhost:8000"
+echo "  4. API available at: http://localhost:8001"
 echo "     - /health          — health check"
 echo "     - /v1/models       — list models (OpenAI compatible)"
 echo "     - /v1/voices       — list registered voices"
@@ -82,5 +86,5 @@ echo "     - POST /v1/audio/speech  — generate speech"
 echo "     - POST /v1/voices/register — register a voice"
 echo "     - DELETE /v1/voices/{name} — delete a voice"
 echo ""
-echo "  5. OpenAPI docs at: http://localhost:8000/docs"
+echo "  5. OpenAPI docs at: http://localhost:8001/docs"
 echo ""

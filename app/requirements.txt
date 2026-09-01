@@ -3,7 +3,7 @@ uvicorn[standard]==0.32.0
 torch==2.10.0+cu128
 torchaudio==2.10.0+cu128
 --extra-index-url https://download.pytorch.org/whl/cu128
-omnivoice>=0.1.0
+omnivoice>=0.2.1
 numpy>=1.26.0
 soundfile>=0.12.0
 pydantic>=2.0.0

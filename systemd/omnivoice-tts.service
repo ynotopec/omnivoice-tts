@@ -6,14 +6,12 @@ After=network.target
 Type=simple
 ExecStart=/home/ai-agent/work/omnivoice-tts/.venv/bin/uvicorn app.server:app --host 0.0.0.0 --port 8001 --log-level info
 WorkingDirectory=/home/ai-agent/work/omnivoice-tts
-Environment=PATH=/home/ai-agent/work/omnivoice-tts/.venv/bin:%(ENV_PATH)
+Environment=PATH=/home/ai-agent/work/omnivoice-tts/.venv/bin:/usr/local/bin:/usr/bin:/bin
 Environment=CUDA_VISIBLE_DEVICES=0
 EnvironmentFile=/home/ai-agent/work/omnivoice-tts/.env
+Restart=on-failure
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
-# GPU passthrough
-CUDA_VISIBLE_DEVICES=0
-
 [Install]
 WantedBy=default.target

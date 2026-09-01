@@ -5,10 +5,9 @@ import os
 import io
 import re
 import base64
-import tempfile
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 import numpy as np
 import soundfile as sf
@@ -25,6 +24,16 @@ VOICES_DIR = os.environ.get("VOICES_DIR", os.path.join(os.path.expanduser("~"), 
 HOST = os.environ.get("OMNIVOICE_HOST", "0.0.0.0")
 PORT = int(os.environ.get("OMNIVOICE_PORT", "8001"))
 API_KEY = os.environ.get("OMNIVOICE_API_KEY", "")  # If set, require authentication
+SAMPLE_RATE = 24000
+
+
+def env_bool(name: str, default: bool = True) -> bool:
+    return os.environ.get(name, str(default)).lower() in ("1", "true", "yes")
+
+
+OMNIVOICE_DENOISE = env_bool("OMNIVOICE_DENOISE")
+OMNIVOICE_PREPROCESS_PROMPT = env_bool("OMNIVOICE_PREPROCESS_PROMPT")
+OMNIVOICE_POSTPROCESS_OUTPUT = env_bool("OMNIVOICE_POSTPROCESS_OUTPUT")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -44,7 +53,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -78,6 +87,74 @@ def load_model():
 def normalize_name(name: str) -> str:
     """Normalize voice name for matching: lowercase, strip spaces/special chars."""
     return re.sub(r'[^a-z0-9]+', '', name.lower())
+
+
+def _as_mono_float32(audio: np.ndarray) -> np.ndarray:
+    """Convert decoded/model audio to a finite mono float32 waveform."""
+    if torch.is_tensor(audio):
+        audio = audio.detach().float().cpu().numpy()
+    audio = np.asarray(audio)
+    audio = np.squeeze(audio)
+    if audio.ndim == 2:
+        # soundfile returns (samples, channels), while models commonly return
+        # (channels, samples). Treat the smaller dimension as channels.
+        audio = audio.mean(axis=1 if audio.shape[1] <= audio.shape[0] else 0)
+    if audio.ndim != 1 or audio.size == 0:
+        raise ValueError("Audio must contain a non-empty mono waveform")
+    audio = np.nan_to_num(audio.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+    return np.clip(audio, -1.0, 1.0)
+
+
+def _decode_audio(source: Union[bytes, str, Path]) -> tuple[np.ndarray, int]:
+    """Decode audio without trusting a client-supplied filename extension."""
+    input_value = io.BytesIO(source) if isinstance(source, bytes) else str(source)
+    try:
+        audio, sample_rate = sf.read(input_value, dtype="float32", always_2d=False)
+        return _as_mono_float32(audio), sample_rate
+    except Exception:
+        # ffmpeg/pydub adds support for formats such as m4a and some MP3 builds.
+        try:
+            from pydub import AudioSegment
+
+            segment = AudioSegment.from_file(io.BytesIO(source) if isinstance(source, bytes) else str(source))
+            segment = segment.set_channels(1)
+            samples = np.asarray(segment.get_array_of_samples(), dtype=np.float32)
+            scale = float(1 << (8 * segment.sample_width - 1))
+            return _as_mono_float32(samples / scale), segment.frame_rate
+        except Exception as decode_error:
+            raise ValueError("Unsupported or corrupt reference audio") from decode_error
+
+
+def reference_input(source: Union[bytes, str, Path]):
+    """Return the exact reference shape accepted by OmniVoice.generate()."""
+    if not isinstance(source, bytes):
+        return str(source)
+    audio, sample_rate = _decode_audio(source)
+    if float(np.max(np.abs(audio))) < 1e-5:
+        raise ValueError("Reference audio is silent")
+    # OmniVoice accepts (torch waveform, sample rate), performs its own mono
+    # conversion/resampling, and applies its native prompt preprocessing.
+    return torch.from_numpy(audio), sample_rate
+
+
+def encode_audio(waveform, output_format: str, sample_rate: int = SAMPLE_RATE) -> tuple[io.BytesIO, str]:
+    """Serialize model output safely and return its MIME type."""
+    waveform = _as_mono_float32(waveform)
+    fmt = output_format.lower()
+    if fmt not in ("mp3", "wav", "flac"):
+        raise HTTPException(status_code=400, detail="response_format must be mp3, wav, or flac")
+    buffer = io.BytesIO()
+    if fmt == "mp3":
+        from pydub import AudioSegment
+
+        pcm = (waveform * 32767).astype("<i2")
+        AudioSegment(pcm.tobytes(), frame_rate=sample_rate, sample_width=2, channels=1).export(
+            buffer, format="mp3", bitrate="192k"
+        )
+    else:
+        sf.write(buffer, waveform, sample_rate, format=fmt.upper(), subtype="PCM_16")
+    buffer.seek(0)
+    return buffer, {"mp3": "audio/mpeg", "wav": "audio/wav", "flac": "audio/flac"}[fmt]
 
 
 def load_voices():
@@ -223,10 +300,15 @@ def list_voices():
 # --- Pydantic models for TTS API ---
 class SpeechRequest(BaseModel):
     model: str = "omnivoice"
-    input: str = Field(..., description="The text to synthesize")
+    input: str = Field(..., min_length=1, description="The text to synthesize")
     voice: str = Field("default", description="Voice name. Use 'clone' for on-the-fly cloning, or a registered voice name.")
     response_format: str = Field("mp3", description="mp3, wav, or flac")
     speed: float = Field(1.0, ge=0.25, le=4.0, description="Playback speed multiplier")
+    language: Optional[str] = Field(None, description="Language name or code, e.g. Portuguese or pt")
+    normalize_text: bool = Field(False, description="Use OmniVoice text normalization")
+    denoise: Optional[bool] = Field(None, description="Use OmniVoice's native <|denoise|> conditioning token")
+    preprocess_prompt: Optional[bool] = Field(None, description="Use OmniVoice reference silence removal and trimming")
+    postprocess_output: Optional[bool] = Field(None, description="Use OmniVoice generated-audio postprocessing")
     reference_audio: Optional[str] = Field(None, description="Base64-encoded reference audio for voice cloning")
     reference_text: Optional[str] = Field(None, description="Transcription of the reference audio")
 
@@ -234,7 +316,7 @@ class SpeechRequest(BaseModel):
 class VoiceRegistrationRequest(BaseModel):
     name: str
     reference_audio: str  # base64
-    reference_text: str
+    reference_text: Optional[str] = None
 
 
 # --- TTS endpoint (OpenAI compatible) ---
@@ -244,82 +326,55 @@ async def create_speech(request: SpeechRequest):
     try:
         m = load_model()
 
-        kwargs = {"text": request.input}
-
-        if request.voice == "clone" and request.reference_audio:
-            # On-the-fly voice cloning
+        kwargs = {
+            "text": request.input,
+            "language": request.language,
+            "speed": request.speed,
+            "normalize_text": request.normalize_text,
+            "denoise": OMNIVOICE_DENOISE if request.denoise is None else request.denoise,
+            "preprocess_prompt": (
+                OMNIVOICE_PREPROCESS_PROMPT
+                if request.preprocess_prompt is None
+                else request.preprocess_prompt
+            ),
+            "postprocess_output": (
+                OMNIVOICE_POSTPROCESS_OUTPUT
+                if request.postprocess_output is None
+                else request.postprocess_output
+            ),
+        }
+        reference = None
+        reference_text = ""
+        if request.voice == "clone":
+            if not request.reference_audio:
+                raise HTTPException(status_code=400, detail="voice='clone' requires reference_audio")
             try:
-                audio_bytes = base64.b64decode(request.reference_audio)
-            except Exception as e:
-                raise HTTPException(status_code=400, detail=f"Invalid reference_audio base64: {e}")
-
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                tmp.write(audio_bytes)
-                ref_audio_path = tmp.name
-
-            kwargs["ref_audio"] = ref_audio_path
-            kwargs["ref_text"] = request.reference_text or ""
-
+                reference = base64.b64decode(request.reference_audio, validate=True)
+            except (ValueError, TypeError) as e:
+                raise HTTPException(status_code=400, detail="Invalid reference_audio base64") from e
+            reference_text = request.reference_text or None
         elif request.voice in available_voices:
-            ref_audio, ref_text = available_voices[request.voice]
-            kwargs["ref_audio"] = ref_audio
-            kwargs["ref_text"] = ref_text
+            reference, reference_text = available_voices[request.voice]
         elif request.voice != "default":
-            # Try fuzzy match on normalized name
             norm_requested = normalize_name(request.voice)
-            matched = None
-            for vid, (path, txt) in available_voices.items():
-                if norm_requested in vid or vid in norm_requested:
-                    matched = (path, txt)
-                    break
-            if matched:
-                kwargs["ref_audio"] = matched[0]
-                kwargs["ref_text"] = matched[1]
-            # else: auto voice, no cloning
+            matches = [value for vid, value in available_voices.items() if norm_requested == normalize_name(vid)]
+            if not matches:
+                raise HTTPException(status_code=404, detail=f"Voice '{request.voice}' not found")
+            reference, reference_text = matches[0]
 
-        # Generate audio
+        if reference is not None:
+            kwargs["ref_audio"] = reference_input(reference)
+            # None activates OmniVoice's documented Whisper auto-transcription;
+            # an empty string would incorrectly suppress it.
+            kwargs["ref_text"] = reference_text or None
         audio = m.generate(**kwargs)
 
-        if not audio:
+        if audio is None or (hasattr(audio, "__len__") and len(audio) == 0):
             raise HTTPException(status_code=500, detail="Model returned no audio")
 
         waveform = audio[0] if isinstance(audio, list) else audio
 
-        # Apply speed
-        if request.speed != 1.0:
-            import scipy.signal
-            factor = int(len(waveform) * request.speed)
-            waveform = scipy.signal.resample(waveform, factor)
-
-        # Convert to requested format
-        fmt = request.response_format.lower()
-        if fmt not in ("mp3", "wav", "flac"):
-            fmt = "mp3"
-
-        buffer = io.BytesIO()
-
-        if fmt == "mp3":
-            import pydub
-            sound = pydub.AudioSegment(
-                waveform.tobytes(),
-                frame_rate=24000,
-                sample_width=waveform.dtype.itemsize,
-                channels=1,
-            )
-            sound.export(buffer, format="mp3", bitrate="192k")
-        elif fmt == "wav":
-            sf.write(buffer, waveform, 24000, format="wav")
-        elif fmt == "flac":
-            sf.write(buffer, waveform, 24000, format="FLAC")
-        else:
-            sf.write(buffer, waveform, 24000, format="wav")
-
-        buffer.seek(0)
-        content_type = {
-            "mp3": "audio/mpeg",
-            "wav": "audio/wav",
-            "flac": "audio/flac",
-        }.get(fmt, "audio/wav")
+        buffer, content_type = encode_audio(waveform, request.response_format, m.sampling_rate)
 
         return StreamingResponse(buffer, media_type=content_type)
 
@@ -335,21 +390,35 @@ async def create_speech(request: SpeechRequest):
 async def register_voice(request: VoiceRegistrationRequest):
     """Register a new voice from base64-encoded reference audio."""
     try:
-        audio_bytes = base64.b64decode(request.reference_audio)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid base64 audio: {e}")
+        audio_bytes = base64.b64decode(request.reference_audio, validate=True)
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail="Invalid base64 audio") from e
 
+    voice_id = normalize_name(request.name)
+    if not voice_id:
+        raise HTTPException(status_code=400, detail="Voice name must contain letters or numbers")
     voice_dir = Path(VOICES_DIR)
     voice_dir.mkdir(parents=True, exist_ok=True)
 
-    audio_path = voice_dir / f"{request.name}.wav"
-    audio_path.write_bytes(audio_bytes)
+    audio_path = voice_dir / f"{voice_id}.wav"
+    try:
+        audio, sample_rate = _decode_audio(audio_bytes)
+        if float(np.max(np.abs(audio))) < 1e-5:
+            raise ValueError("Reference audio is silent")
+        # Store decoded PCM without altering the conditioning signal. OmniVoice
+        # owns resampling, level normalization, silence removal, and trimming.
+        sf.write(audio_path, audio, sample_rate, subtype="PCM_16")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
-    text_path = voice_dir / f"{request.name}.txt"
-    text_path.write_text(request.reference_text, encoding="utf-8")
+    text_path = voice_dir / f"{voice_id}.txt"
+    reference_text = request.reference_text.strip() if request.reference_text else ""
+    if reference_text:
+        text_path.write_text(reference_text, encoding="utf-8")
+    else:
+        text_path.unlink(missing_ok=True)
 
-    voice_id = normalize_name(request.name)
-    available_voices[voice_id] = (str(audio_path), request.reference_text)
+    available_voices[voice_id] = (str(audio_path), reference_text or None)
     logger.info(f"Registered voice '{voice_id}'")
 
     return {"status": "ok", "voice": voice_id}
@@ -384,6 +453,7 @@ async def clone_voice_from_upload(
     reference_audio: UploadFile = File(...),
     reference_text: Optional[str] = Form(None),
     output_format: str = Form("mp3"),
+    language: Optional[str] = Form(None),
 ):
     """Quick TTS with voice upload in a single call."""
     try:
@@ -393,32 +463,17 @@ async def clone_voice_from_upload(
         if not audio_data:
             raise HTTPException(status_code=400, detail="No audio uploaded")
 
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            tmp.write(audio_data)
-            ref_path = tmp.name
-
-        kwargs = {
-            "text": text,
-            "ref_audio": ref_path,
-            "ref_text": reference_text or "",
-        }
-
-        audio = m.generate(**kwargs)
+        audio = m.generate(
+            text=text,
+            language=language,
+            ref_audio=reference_input(audio_data),
+            ref_text=reference_text or None,
+            denoise=OMNIVOICE_DENOISE,
+            preprocess_prompt=OMNIVOICE_PREPROCESS_PROMPT,
+            postprocess_output=OMNIVOICE_POSTPROCESS_OUTPUT,
+        )
         waveform = audio[0] if isinstance(audio, list) else audio
-
-        buffer = io.BytesIO()
-        if output_format.lower() == "mp3":
-            import pydub
-            sound = pydub.AudioSegment(
-                waveform.tobytes(), frame_rate=24000, sample_width=waveform.dtype.itemsize, channels=1
-            )
-            sound.export(buffer, format="mp3")
-        else:
-            sf.write(buffer, waveform, 24000, format="wav")
-
-        buffer.seek(0)
-        fmt = output_format.lower()
-        content_type = {"mp3": "audio/mpeg", "wav": "audio/wav", "flac": "audio/flac"}.get(fmt, "audio/wav")
+        buffer, content_type = encode_audio(waveform, output_format, m.sampling_rate)
 
         return StreamingResponse(buffer, media_type=content_type)
 
@@ -427,3 +482,9 @@ async def clone_voice_from_upload(
     except Exception as e:
         logger.error(f"Clone TTS failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Synthesis failed: {str(e)}")
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host=HOST, port=PORT, log_level="info")

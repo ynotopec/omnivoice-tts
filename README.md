@@ -40,10 +40,10 @@ bash service.sh start
 
 ```bash
 # List models
-curl http://localhost:8000/v1/models
+curl http://localhost:8001/v1/models
 
 # Generate speech (using a registered voice)
-curl http://localhost:8000/v1/audio/speech \
+curl http://localhost:8001/v1/audio/speech \
   -H "Content-Type: application/json" \
   -d '{
     "model": "omnivoice",
@@ -55,7 +55,7 @@ curl http://localhost:8000/v1/audio/speech \
   --output speech.mp3
 
 # Register a new voice (base64 audio)
-curl http://localhost:8000/v1/voices/register \
+curl http://localhost:8001/v1/voices/register \
   -H "Content-Type: application/json" \
   -d '{
     "name": "nova_voz",
@@ -64,7 +64,7 @@ curl http://localhost:8000/v1/voices/register \
   }'
 
 # On-the-fly voice cloning
-curl http://localhost:8000/v1/audio/speech \
+curl http://localhost:8001/v1/audio/speech \
   -H "Content-Type: application/json" \
   -d '{
     "model": "omnivoice",
@@ -99,6 +99,8 @@ curl http://localhost:8000/v1/audio/speech \
   "voice": "AntonioPacheco",  // or "clone" for on-the-fly
   "response_format": "mp3",   // mp3, wav, flac
   "speed": 1.0,               // 0.25 - 4.0
+  "language": "Portuguese",   // optional language name or code ("pt")
+  "denoise": true,             // optional OmniVoice-native override
   "reference_audio": "<base64>"  // optional, for voice cloning
 }
 ```
@@ -139,10 +141,31 @@ Environment variables (see `.env.example`):
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OMNIVOICE_HOST` | `0.0.0.0` | Bind address |
-| `OMNIVOICE_PORT` | `8000` | Port |
+| `OMNIVOICE_PORT` | `8001` | Port |
 | `MODEL_NAME` | `k2-fsa/OmniVoice` | HuggingFace model |
 | `MODEL_CACHE_DIR` | `~/.cache/huggingface` | Model cache location |
 | `VOICES_DIR` | `~/.omnivoice/voices` | Voice reference files |
+| `OMNIVOICE_DENOISE` | `true` | Use OmniVoice's native `<|denoise|>` conditioning token |
+| `OMNIVOICE_PREPROCESS_PROMPT` | `true` | Use native reference silence removal, trimming, and punctuation handling |
+| `OMNIVOICE_POSTPROCESS_OUTPUT` | `true` | Use native generated-audio postprocessing |
+
+### Reference audio quality
+
+Reference processing follows OmniVoice's public inference API rather than applying
+an additional spectral filter. OmniVoice performs mono conversion, resampling,
+level normalization, silence removal, and prompt trimming; its native denoise token
+is enabled by default. For the best Portuguese pronunciation and the least noise:
+
+- use a dry recording with one speaker, no music, echo, or overlapping speech;
+- provide an exact Portuguese transcription, including accents and punctuation;
+- use the model's recommended 3–10 seconds of useful reference speech;
+- use WAV or FLAC when possible; lossy inputs are supported but cannot restore
+  detail already removed by compression.
+
+Set `OMNIVOICE_DENOISE=false` only when you intentionally want to disable the
+model's denoise conditioning. Send `"language": "Portuguese"` (or `"pt"`) in a
+speech request for slightly better language-specific performance. `speed` is also
+passed directly to OmniVoice instead of resampling its generated waveform.
 
 ## License
 
