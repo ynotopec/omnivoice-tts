@@ -3,9 +3,9 @@
 
 import os
 import io
+import re
 import base64
 import tempfile
-import uuid
 import logging
 from pathlib import Path
 from typing import Optional
@@ -13,8 +13,9 @@ from typing import Optional
 import numpy as np
 import soundfile as sf
 import torch
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request, Header
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
 from fastapi.responses import StreamingResponse, Response
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 # --- Configuration ---
@@ -39,10 +40,21 @@ app = FastAPI(
     description="OpenAI-compatible TTS with voice cloning — 600+ languages",
 )
 
+# CORS (allow browser requests)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # --- Global model instance ---
 model = None
-model_device_map = "cuda:0" if "cuda" in os.environ.get("CUDA_VISIBLE_DEVICES", "cuda") else "cpu"
+model_device_map = "cuda:0"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+if DEVICE == "cpu":
+    model_device_map = "cpu"
 
 
 def load_model():
@@ -63,9 +75,14 @@ def load_model():
     return model
 
 
+def normalize_name(name: str) -> str:
+    """Normalize voice name for matching: lowercase, strip spaces/special chars."""
+    return re.sub(r'[^a-z0-9]+', '', name.lower())
+
+
 def load_voices():
-    """Scan voices_dir for reference audio files and return dict {name: (path, text)}.
-    """
+    """Scan voices_dir for reference audio files.
+    Match audio files to .txt files by comparing normalized names."""
     voices = {}
     voices_path = Path(VOICES_DIR)
     if not voices_path.exists():
@@ -73,21 +90,47 @@ def load_voices():
         voices_path.mkdir(parents=True, exist_ok=True)
         return voices
 
+    # Collect all audio files
+    audio_files = []
+    txt_files = set()
+
     for f in sorted(voices_path.iterdir()):
-        if f.suffix.lower() in (".wav", ".mp3", ".flac", ".ogg"):
-            name = f.stem
-            # Try to load corresponding .txt file for the reference text
-            ref_text_path = f.with_suffix(".txt")
-            if ref_text_path.exists():
-                ref_text = ref_text_path.read_text(encoding="utf-8").strip()
-            else:
-                ref_text = ""
-            voices[name] = (str(f), ref_text)
-            logger.info(f"Loaded voice '{name}' from {f} (ref_text={ref_text!r})")
+        if f.suffix.lower() in (".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac"):
+            audio_files.append(f)
+        elif f.suffix.lower() == ".txt":
+            txt_files.add(f.stem)
+
+    for f in audio_files:
+        audio_name = f.stem  # e.g. "Marco-Voix 260901_203931" or "marco-voice"
+        norm_audio = normalize_name(audio_name)
+
+        # Try exact match first (same stem + .txt)
+        ref_text_path = f.with_suffix(".txt")
+        ref_text = ""
+
+        if ref_text_path.exists():
+            ref_text = ref_text_path.read_text(encoding="utf-8").strip()
+        else:
+            # Try fuzzy match: find a .txt whose normalized name is a substring of or contains the audio's normalized name
+            for txt_name in txt_files:
+                norm_txt = normalize_name(txt_name)
+                if len(norm_txt) >= 4 and (norm_txt in norm_audio or norm_audio in norm_txt):
+                    ref_text_path = voices_path / f"{txt_name}.txt"
+                    if ref_text_path.exists():
+                        ref_text = ref_text_path.read_text(encoding="utf-8").strip()
+                        break
+
+        if ref_text:
+            voice_id = normalize_name(audio_name)
+        else:
+            voice_id = audio_name
+
+        voices[voice_id] = (str(f), ref_text)
+        logger.info(f"Loaded voice '{voice_id}' from {f} (ref_text={ref_text!r})")
     return voices
 
 
-# Voices registry: {voice_name: (ref_audio_path, ref_text)}
+# Voices registry: {voice_id: (ref_audio_path, ref_text)}
 available_voices = {}
 
 
@@ -101,18 +144,37 @@ def startup():
 
 
 # --- Authentication middleware ---
-async def verify_api_key(request: Request):
-    """Check for API key in Authorization header or query param."""
+@app.middleware("http")
+async def authenticate(request: Request, call_next):
+    """Check API key on /v1/* endpoints."""
     if not API_KEY:
-        return  # No auth required
+        return await call_next(request)
+
+    path = request.url.path
+    # Skip auth for non-v1 endpoints and health
+    if not path.startswith("/v1/") and path != "/health":
+        return await call_next(request)
+
+    # Check Authorization header
     auth_header = request.headers.get("Authorization", "")
-    query_key = request.query_params.get("api_key", "")
-    token = auth_header.replace("Bearer ", "") if auth_header.startswith("Bearer ") else query_key
-    if token != API_KEY:
-        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+    token = None
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+    else:
+        # Check query param
+        token = request.query_params.get("api_key", "")
+
+    if not token or token != API_KEY:
+        return Response(
+            content='{"detail":"Invalid or missing API key"}',
+            status_code=401,
+            media_type="application/json",
+        )
+
+    return await call_next(request)
 
 
-# --- Endpoints ---
+# --- Health ---
 @app.get("/health")
 def health():
     return {
@@ -123,11 +185,10 @@ def health():
     }
 
 
+# --- OpenAI-compatible endpoints ---
 @app.get("/v1/models")
-async def list_models():
+def list_models():
     """Return models endpoint (OpenAI compatible)."""
-    if API_KEY:
-        await verify_api_key(None)  # Will be called via middleware pattern below
     return {
         "object": "list",
         "data": [
@@ -143,10 +204,8 @@ async def list_models():
 
 
 @app.get("/v1/voices")
-async def list_voices():
+def list_voices():
     """Return list of available cloned voices."""
-    if API_KEY:
-        await verify_api_key(None)
     return {
         "object": "list",
         "data": [
@@ -168,7 +227,6 @@ class SpeechRequest(BaseModel):
     voice: str = Field("default", description="Voice name. Use 'clone' for on-the-fly cloning, or a registered voice name.")
     response_format: str = Field("mp3", description="mp3, wav, or flac")
     speed: float = Field(1.0, ge=0.25, le=4.0, description="Playback speed multiplier")
-    # Voice cloning fields
     reference_audio: Optional[str] = Field(None, description="Base64-encoded reference audio for voice cloning")
     reference_text: Optional[str] = Field(None, description="Transcription of the reference audio")
 
@@ -186,7 +244,6 @@ async def create_speech(request: SpeechRequest):
     try:
         m = load_model()
 
-        # Determine generation parameters
         kwargs = {"text": request.input}
 
         if request.voice == "clone" and request.reference_audio:
@@ -200,17 +257,25 @@ async def create_speech(request: SpeechRequest):
                 tmp.write(audio_bytes)
                 ref_audio_path = tmp.name
 
-            ref_text = request.reference_text or ""
             kwargs["ref_audio"] = ref_audio_path
-            kwargs["ref_text"] = ref_text
+            kwargs["ref_text"] = request.reference_text or ""
+
         elif request.voice in available_voices:
-            # Use pre-registered voice
             ref_audio, ref_text = available_voices[request.voice]
             kwargs["ref_audio"] = ref_audio
             kwargs["ref_text"] = ref_text
-        else:
-            # Auto voice (no cloning)
-            pass
+        elif request.voice != "default":
+            # Try fuzzy match on normalized name
+            norm_requested = normalize_name(request.voice)
+            matched = None
+            for vid, (path, txt) in available_voices.items():
+                if norm_requested in vid or vid in norm_requested:
+                    matched = (path, txt)
+                    break
+            if matched:
+                kwargs["ref_audio"] = matched[0]
+                kwargs["ref_text"] = matched[1]
+            # else: auto voice, no cloning
 
         # Generate audio
         audio = m.generate(**kwargs)
@@ -218,10 +283,9 @@ async def create_speech(request: SpeechRequest):
         if not audio:
             raise HTTPException(status_code=500, detail="Model returned no audio")
 
-        # audio is list of np.ndarray at 24kHz
         waveform = audio[0] if isinstance(audio, list) else audio
 
-        # Apply speed if needed
+        # Apply speed
         if request.speed != 1.0:
             import scipy.signal
             factor = int(len(waveform) * request.speed)
@@ -236,10 +300,9 @@ async def create_speech(request: SpeechRequest):
 
         if fmt == "mp3":
             import pydub
-            sample_rate = 24000
             sound = pydub.AudioSegment(
                 waveform.tobytes(),
-                frame_rate=sample_rate,
+                frame_rate=24000,
                 sample_width=waveform.dtype.itemsize,
                 channels=1,
             )
@@ -267,7 +330,7 @@ async def create_speech(request: SpeechRequest):
         raise HTTPException(status_code=500, detail=f"Synthesis failed: {str(e)}")
 
 
-# --- Voice management endpoints ---
+# --- Voice management ---
 @app.post("/v1/voices/register")
 async def register_voice(request: VoiceRegistrationRequest):
     """Register a new voice from base64-encoded reference audio."""
@@ -279,33 +342,39 @@ async def register_voice(request: VoiceRegistrationRequest):
     voice_dir = Path(VOICES_DIR)
     voice_dir.mkdir(parents=True, exist_ok=True)
 
-    # Save audio file
     audio_path = voice_dir / f"{request.name}.wav"
     audio_path.write_bytes(audio_bytes)
 
-    # Save reference text
     text_path = voice_dir / f"{request.name}.txt"
     text_path.write_text(request.reference_text, encoding="utf-8")
 
-    available_voices[request.name] = (str(audio_path), request.reference_text)
-    logger.info(f"Registered voice '{request.name}'")
+    voice_id = normalize_name(request.name)
+    available_voices[voice_id] = (str(audio_path), request.reference_text)
+    logger.info(f"Registered voice '{voice_id}'")
 
-    return {"status": "ok", "voice": request.name}
+    return {"status": "ok", "voice": voice_id}
 
 
 @app.delete("/v1/voices/{voice_name}")
 async def delete_voice(voice_name: str):
     """Remove a registered voice."""
     voice_dir = Path(VOICES_DIR)
-    audio_path = voice_dir / f"{voice_name}.wav"
-    text_path = voice_dir / f"{voice_name}.txt"
+    # Match by normalized name
+    matched = None
+    for vid in available_voices:
+        if normalize_name(vid) == normalize_name(voice_name) or vid == voice_name:
+            matched = vid
+            break
 
-    if audio_path.exists():
-        audio_path.unlink()
-    if text_path.exists():
-        text_path.unlink()
+    if matched:
+        available_voices.pop(matched, None)
+        audio_path = voice_dir / f"{matched}.wav"
+        text_path = voice_dir / f"{matched}.txt"
+        if audio_path.exists():
+            audio_path.unlink()
+        if text_path.exists():
+            text_path.unlink()
 
-    available_voices.pop(voice_name, None)
     return {"status": "ok", "voice": voice_name}
 
 
