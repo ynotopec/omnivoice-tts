@@ -1,10 +1,15 @@
-# Virtual environment
+# Python
 .venv/
+venv/
 __pycache__/
 *.pyc
-
-# Model cache (downloaded to ~/.cache/huggingface)
-.cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
 
 # Voice data
 voices/
@@ -15,3 +20,5 @@ voices/
 
 # Environment
 .env
+.env.*
+!.env.example

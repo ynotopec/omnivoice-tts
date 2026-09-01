@@ -6,6 +6,7 @@ import io
 import re
 import base64
 import logging
+import secrets
 from pathlib import Path
 from typing import Optional, Union
 
@@ -19,11 +20,10 @@ from pydantic import BaseModel, Field
 
 # --- Configuration ---
 MODEL_NAME = os.environ.get("MODEL_NAME", "k2-fsa/OmniVoice")
-MODEL_CACHE_DIR = os.environ.get("MODEL_CACHE_DIR", os.path.expanduser("~/.cache/huggingface"))
 VOICES_DIR = os.environ.get("VOICES_DIR", os.path.join(os.path.expanduser("~"), ".omnivoice", "voices"))
 HOST = os.environ.get("OMNIVOICE_HOST", "0.0.0.0")
 PORT = int(os.environ.get("OMNIVOICE_PORT", "8001"))
-API_KEY = os.environ.get("OMNIVOICE_API_KEY", "")  # If set, require authentication
+API_TOKEN = os.environ.get("OMNIVOICE_API_TOKEN", os.environ.get("OMNIVOICE_API_KEY", ""))
 SAMPLE_RATE = 24000
 
 
@@ -224,7 +224,7 @@ def startup():
 @app.middleware("http")
 async def authenticate(request: Request, call_next):
     """Check API key on /v1/* endpoints."""
-    if not API_KEY:
+    if not API_TOKEN:
         return await call_next(request)
 
     path = request.url.path
@@ -234,14 +234,9 @@ async def authenticate(request: Request, call_next):
 
     # Check Authorization header
     auth_header = request.headers.get("Authorization", "")
-    token = None
-    if auth_header.startswith("Bearer "):
-        token = auth_header[7:]
-    else:
-        # Check query param
-        token = request.query_params.get("api_key", "")
+    token = auth_header[7:] if auth_header.startswith("Bearer ") else ""
 
-    if not token or token != API_KEY:
+    if not token or not secrets.compare_digest(token, API_TOKEN):
         return Response(
             content='{"detail":"Invalid or missing API key"}',
             status_code=401,
