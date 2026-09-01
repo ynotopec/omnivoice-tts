@@ -1,0 +1,17 @@
+# Virtual environment
+.venv/
+__pycache__/
+*.pyc
+
+# Model cache (downloaded to ~/.cache/huggingface)
+.cache/
+
+# Voice data
+voices/
+*.wav
+*.mp3
+*.flac
+*.ogg
+
+# Environment
+.env
