@@ -151,8 +151,8 @@ async def authenticate(request: Request, call_next):
         return await call_next(request)
 
     path = request.url.path
-    # Skip auth for non-v1 endpoints and health
-    if not path.startswith("/v1/") and path != "/health":
+    # Only protect /v1/* endpoints
+    if not path.startswith("/v1/"):
         return await call_next(request)
 
     # Check Authorization header
