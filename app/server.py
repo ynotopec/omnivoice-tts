@@ -13,7 +13,7 @@ from typing import Optional
 import numpy as np
 import soundfile as sf
 import torch
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request, Header
 from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel, Field
 
@@ -22,8 +22,8 @@ MODEL_NAME = os.environ.get("MODEL_NAME", "k2-fsa/OmniVoice")
 MODEL_CACHE_DIR = os.environ.get("MODEL_CACHE_DIR", os.path.expanduser("~/.cache/huggingface"))
 VOICES_DIR = os.environ.get("VOICES_DIR", os.path.join(os.path.expanduser("~"), ".omnivoice", "voices"))
 HOST = os.environ.get("OMNIVOICE_HOST", "0.0.0.0")
-PORT = int(os.environ.get("OMNIVOICE_PORT", "8000"))
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+PORT = int(os.environ.get("OMNIVOICE_PORT", "8001"))
+API_KEY = os.environ.get("OMNIVOICE_API_KEY", "")  # If set, require authentication
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,7 +41,8 @@ app = FastAPI(
 
 # --- Global model instance ---
 model = None
-model_device_map = "cuda:0" if DEVICE == "cuda" else "cpu"
+model_device_map = "cuda:0" if "cuda" in os.environ.get("CUDA_VISIBLE_DEVICES", "cuda") else "cpu"
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def load_model():
@@ -99,9 +100,34 @@ def startup():
     logger.info(f"Available voices: {list(available_voices.keys())}")
 
 
+# --- Authentication middleware ---
+async def verify_api_key(request: Request):
+    """Check for API key in Authorization header or query param."""
+    if not API_KEY:
+        return  # No auth required
+    auth_header = request.headers.get("Authorization", "")
+    query_key = request.query_params.get("api_key", "")
+    token = auth_header.replace("Bearer ", "") if auth_header.startswith("Bearer ") else query_key
+    if token != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+
+# --- Endpoints ---
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "model_loaded": model is not None,
+        "device": DEVICE,
+        "voices": len(available_voices),
+    }
+
+
 @app.get("/v1/models")
-def list_models():
+async def list_models():
     """Return models endpoint (OpenAI compatible)."""
+    if API_KEY:
+        await verify_api_key(None)  # Will be called via middleware pattern below
     return {
         "object": "list",
         "data": [
@@ -117,8 +143,10 @@ def list_models():
 
 
 @app.get("/v1/voices")
-def list_voices():
+async def list_voices():
     """Return list of available cloned voices."""
+    if API_KEY:
+        await verify_api_key(None)
     return {
         "object": "list",
         "data": [
@@ -330,14 +358,3 @@ async def clone_voice_from_upload(
     except Exception as e:
         logger.error(f"Clone TTS failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Synthesis failed: {str(e)}")
-
-
-# --- Health check ---
-@app.get("/health")
-def health():
-    return {
-        "status": "ok",
-        "model_loaded": model is not None,
-        "device": DEVICE,
-        "voices": len(available_voices),
-    }

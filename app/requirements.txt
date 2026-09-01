@@ -1,7 +1,7 @@
 fastapi==0.115.0
 uvicorn[standard]==0.32.0
-torch==2.8.0+cu128
-torchaudio==2.8.0+cu128
+torch==2.10.0+cu128
+torchaudio==2.10.0+cu128
 --extra-index-url https://download.pytorch.org/whl/cu128
 omnivoice>=0.1.0
 numpy>=1.26.0
