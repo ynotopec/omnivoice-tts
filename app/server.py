@@ -89,6 +89,49 @@ def normalize_name(name: str) -> str:
     return re.sub(r'[^a-z0-9]+', '', name.lower())
 
 
+def resolve_language(language: Optional[str], model_instance) -> Optional[str]:
+    """Resolve user-friendly language values to an OmniVoice language ID.
+
+    OmniVoice silently falls back to language-agnostic generation for unknown
+    values.  That is particularly harmful for cross-lingual cloning, where an
+    explicit target language gives the model the phonetic conditioning it
+    needs.  API clients also commonly send BCP-47 locales such as ``fr-FR``
+    rather than the model's ``fr`` identifier.
+    """
+    if (
+        language is None
+        or not language.strip()
+        or language.lower() in ("auto", "none")
+    ):
+        return None
+
+    value = language.strip()
+    supported_ids = model_instance.supported_language_ids()
+    supported_names = model_instance.supported_language_names()
+    ids_by_lower = {item.lower(): item for item in supported_ids}
+    names_by_lower = {item.lower(): item for item in supported_names}
+
+    lowered = value.lower().replace("_", "-")
+    if lowered in ids_by_lower:
+        return ids_by_lower[lowered]
+    if lowered in names_by_lower:
+        return names_by_lower[lowered]
+
+    # Region/script subtags affect locale conventions, but OmniVoice 0.2.x
+    # accepts only its base language identifiers (for example, fr not fr-FR).
+    base_id = lowered.split("-", 1)[0]
+    if base_id in ids_by_lower:
+        return ids_by_lower[base_id]
+
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"Unsupported language '{language}'. Use an OmniVoice language "
+            "ID/name from GET /v1/languages, or omit it for auto mode."
+        ),
+    )
+
+
 def _as_mono_float32(audio: np.ndarray) -> np.ndarray:
     """Convert decoded/model audio to a finite mono float32 waveform."""
     if torch.is_tensor(audio):
@@ -292,6 +335,19 @@ def list_voices():
     }
 
 
+@app.get("/v1/languages")
+def list_languages():
+    """Return language IDs and names accepted by the loaded model."""
+    m = load_model()
+    return {
+        "object": "list",
+        "data": {
+            "ids": sorted(m.supported_language_ids()),
+            "names": sorted(m.supported_language_names()),
+        },
+    }
+
+
 # --- Pydantic models for TTS API ---
 class SpeechRequest(BaseModel):
     model: str = "omnivoice"
@@ -323,7 +379,7 @@ async def create_speech(request: SpeechRequest):
 
         kwargs = {
             "text": request.input,
-            "language": request.language,
+            "language": resolve_language(request.language, m),
             "speed": request.speed,
             "normalize_text": request.normalize_text,
             "denoise": OMNIVOICE_DENOISE if request.denoise is None else request.denoise,
@@ -460,7 +516,7 @@ async def clone_voice_from_upload(
 
         audio = m.generate(
             text=text,
-            language=language,
+            language=resolve_language(language, m),
             ref_audio=reference_input(audio_data),
             ref_text=reference_text or None,
             denoise=OMNIVOICE_DENOISE,

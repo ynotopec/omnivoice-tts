@@ -43,8 +43,16 @@ curl http://127.0.0.1:8001/v1/audio/speech \
 ```
 
 OpenAPI documentation is available at `/docs`; `/v1/models` and `/v1/voices`
-provide discovery. All `/v1/*` routes require `Authorization: Bearer <token>` when
+provide discovery. `/v1/languages` lists the language identifiers accepted by
+the installed model. All `/v1/*` routes require `Authorization: Bearer <token>` when
 `OMNIVOICE_API_TOKEN` is set.
+
+For cross-lingual cloning, always set `language` to the language of the text to
+synthesize—not the language of the reference recording. This target-language
+conditioning improves pronunciation and helps keep the reference language from
+dominating the accent. Language names, ISO identifiers, and common locales are
+accepted (`French`, `fr`, and `fr-FR` are equivalent). Unknown values return a
+clear `400` error instead of silently degrading to language-agnostic synthesis.
 
 For a persistent cloned voice, place a 3–10 second recording and its exact
 transcript in `~/.omnivoice/voices` with matching names, for example

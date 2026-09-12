@@ -8,7 +8,15 @@ import numpy as np
 import soundfile as sf
 import torch
 
-from app.server import SAMPLE_RATE, SpeechRequest, _decode_audio, create_speech, encode_audio, reference_input
+from app.server import (
+    SAMPLE_RATE,
+    SpeechRequest,
+    _decode_audio,
+    create_speech,
+    encode_audio,
+    reference_input,
+    resolve_language,
+)
 
 
 def wav_bytes(source, sample_rate=8000):
@@ -18,6 +26,24 @@ def wav_bytes(source, sample_rate=8000):
 
 
 class AudioPipelineTests(unittest.TestCase):
+    class LanguageModel:
+        def supported_language_ids(self):
+            return {"en", "fr", "pt"}
+
+        def supported_language_names(self):
+            return {"English", "French", "Portuguese"}
+
+    def test_language_resolver_accepts_locale_and_case_variants(self):
+        model = self.LanguageModel()
+
+        self.assertEqual(resolve_language("fr-FR", model), "fr")
+        self.assertEqual(resolve_language("PT_br", model), "pt")
+        self.assertEqual(resolve_language("french", model), "French")
+
+    def test_language_resolver_rejects_unknown_value(self):
+        with self.assertRaisesRegex(Exception, "Unsupported language"):
+            resolve_language("not-a-language", self.LanguageModel())
+
     def test_decode_audio_uses_content_instead_of_extension(self):
         source = np.linspace(-0.5, 0.5, 8000, dtype=np.float32)
 
@@ -53,6 +79,12 @@ class AudioPipelineTests(unittest.TestCase):
     def test_speech_uses_omnivoice_native_reference_options(self):
         class FakeModel:
             sampling_rate = SAMPLE_RATE
+
+            def supported_language_ids(self):
+                return {"pt"}
+
+            def supported_language_names(self):
+                return {"Portuguese"}
 
             def generate(self, **kwargs):
                 self.kwargs = kwargs
