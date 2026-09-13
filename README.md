@@ -43,22 +43,43 @@ curl http://127.0.0.1:8001/v1/audio/speech \
 ```
 
 OpenAPI documentation is available at `/docs`; `/v1/models` and `/v1/voices`
-provide discovery. `/v1/languages` lists the language identifiers accepted by
-the installed model. All `/v1/*` routes require `Authorization: Bearer <token>` when
+provide discovery. All `/v1/*` routes require `Authorization: Bearer <token>` when
 `OMNIVOICE_API_TOKEN` is set.
-
-For cross-lingual cloning, always set `language` to the language of the text to
-synthesize—not the language of the reference recording. This target-language
-conditioning improves pronunciation and helps keep the reference language from
-dominating the accent. Language names, ISO identifiers, and common locales are
-accepted (`French`, `fr`, and `fr-FR` are equivalent). Unknown values return a
-clear `400` error instead of silently degrading to language-agnostic synthesis.
 
 For a persistent cloned voice, place a 3–10 second recording and its exact
 transcript in `~/.omnivoice/voices` with matching names, for example
 `portuguese.wav` and `portuguese.txt`, then restart. WAV/FLAC without music, echo,
 or overlapping speech gives the cleanest result. OmniVoice performs its own native
 reference resampling, prompt preprocessing, and denoise conditioning.
+
+### Multilingual cloning limitations
+
+OmniVoice's [upstream voice-cloning tips](https://github.com/k2-fsa/OmniVoice#voice-cloning)
+explicitly note that cross-lingual cloning retains an accent from the reference
+recording's language. The `language` request
+field supplies useful target-language conditioning, but it cannot remove that
+model limitation. For standard pronunciation, register a separate 3–10 second
+reference spoken by the same person in each target language and select the
+matching voice when synthesizing. For example:
+
+```text
+~/.omnivoice/voices/marco-fr.wav  + marco-fr.txt
+~/.omnivoice/voices/marco-en.wav  + marco-en.txt
+~/.omnivoice/voices/marco-pt.wav  + marco-pt.txt
+```
+
+The transcript must exactly match what is spoken in its audio file. Supplying an
+incorrect transcript—or a translation instead of the original words—degrades
+alignment, pronunciation, and speaker similarity. Omitting `reference_text`
+enables OmniVoice's Whisper transcription, but an exact manual transcript is
+preferable when available.
+
+Pronunciation overrides are model-specific: English accepts bracketed CMU
+phonemes such as `[B EY1 S]`, while Chinese accepts pinyin with tone numbers.
+These controls are not a general cross-language accent conversion mechanism.
+Likewise, upstream voice-design accent controls are trained for English, and
+Chinese dialect controls are trained for Chinese; they should not be presented
+as a fix for a cloned voice in another language.
 
 ## Hardware
 
