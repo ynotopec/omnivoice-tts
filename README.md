@@ -52,6 +52,35 @@ transcript in `~/.omnivoice/voices` with matching names, for example
 or overlapping speech gives the cleanest result. OmniVoice performs its own native
 reference resampling, prompt preprocessing, and denoise conditioning.
 
+### Multilingual cloning limitations
+
+OmniVoice's [upstream voice-cloning tips](https://github.com/k2-fsa/OmniVoice#voice-cloning)
+explicitly note that cross-lingual cloning retains an accent from the reference
+recording's language. The `language` request
+field supplies useful target-language conditioning, but it cannot remove that
+model limitation. For standard pronunciation, register a separate 3–10 second
+reference spoken by the same person in each target language and select the
+matching voice when synthesizing. For example:
+
+```text
+~/.omnivoice/voices/marco-fr.wav  + marco-fr.txt
+~/.omnivoice/voices/marco-en.wav  + marco-en.txt
+~/.omnivoice/voices/marco-pt.wav  + marco-pt.txt
+```
+
+The transcript must exactly match what is spoken in its audio file. Supplying an
+incorrect transcript—or a translation instead of the original words—degrades
+alignment, pronunciation, and speaker similarity. Omitting `reference_text`
+enables OmniVoice's Whisper transcription, but an exact manual transcript is
+preferable when available.
+
+Pronunciation overrides are model-specific: English accepts bracketed CMU
+phonemes such as `[B EY1 S]`, while Chinese accepts pinyin with tone numbers.
+These controls are not a general cross-language accent conversion mechanism.
+Likewise, upstream voice-design accent controls are trained for English, and
+Chinese dialect controls are trained for Chinese; they should not be presented
+as a fix for a cloned voice in another language.
+
 ## Hardware
 
 Dependencies are intentionally not tied to an x86-only CUDA wheel index. `uv`
